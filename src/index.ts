@@ -3,15 +3,16 @@
  * @param {string} query - Query string in format ${path[condition && property]} or ${path.length}
  * @returns {*} - The result of the query
  */
-export const query = (query: string, data: any) => {
+export const query = <T = any>(query: string, data: any): T | null => {
   // Extract the inner query from ${...}, handling nested ${} patterns
   const inner = extractOuterQuery(query);
 
   // Check if it's a template literal (backtick string)
   if (inner.startsWith("`") && inner.endsWith("`")) {
-    return evaluateTemplateLiteral(inner, data);
+    return evaluateTemplateLiteral(inner, data) as T;
   }
 
+  return null;
   // Check if it's a ternary operator
   // if (inner.includes("?")) {
   //   return this.evaluateTernary(inner);
