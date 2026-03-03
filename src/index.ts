@@ -1,348 +1,458 @@
-/**
- * Parse and execute a query
- * @param {string} query - Query string in format ${path[condition && property]} or ${path.length}
- * @returns {*} - The result of the query
- */
-export const query = <T = any>(query: string, data: any): T | null => {
-  // Extract the inner query from ${...}, handling nested ${} patterns
-  const inner = extractOuterQuery(query);
+export type PipeTransform = (value: any, ...args: string[]) => any;
 
-  // Check if it's a template literal (backtick string)
-  if (inner.startsWith("`") && inner.endsWith("`")) {
-    return evaluateTemplateLiteral(inner, data) as T;
+export interface QueryOptions {
+  /** Custom pipes to extend or override built-in pipes */
+  pipes?: Record<string, PipeTransform>;
+}
+
+// --- Internal Utilities & Extractors ---
+
+/** Intelligently splits path and pipes while ignoring | inside brackets */
+const extractPipes = (expr: string) => {
+  let bracketDepth = 0;
+  for (let i = 0; i < expr.length; i++) {
+    if (expr[i] === "[") bracketDepth++;
+    else if (expr[i] === "]") bracketDepth--;
+    else if (expr[i] === "|" && bracketDepth === 0) {
+      // PRESERVE trailing spaces: Only strip leading spaces from the pipe expression
+      return {
+        main: expr.slice(0, i).trim(),
+        pipes: expr.slice(i + 1).replace(/^\s+/, ""),
+      };
+    }
   }
-
-  return null;
-  // Check if it's a ternary operator
-  // if (inner.includes("?")) {
-  //   return this.evaluateTernary(inner);
-  // }
-
-  // Check if it's a length query
-  // if (inner.endsWith(".length")) {
-  //   return this.getLength(inner);
-  // }
-
-  // Check if it's a find operation with conditions (e.g., items[type == 'TIR' && value])
-  // vs simple array index access (e.g., items[0] or properties.items[0].field)
-  //   if (inner.includes("[")) {
-  //     // Check if it's a simple numeric array index (e.g., [0], [1], [123])
-  //     // vs a conditional find (e.g., [type == 'TIR'], [condition && property])
-  //     const bracketMatch = inner.match(/\[([^\]]+)\]/);
-  //     if (bracketMatch) {
-  //       const bracketContent = bracketMatch[1];
-  //       // If bracket contains only a number, it's a simple array index - use getProperty
-  //       // Otherwise, it's a conditional find - use findWithCondition
-  //       if (/^\d+$/.test(bracketContent.trim())) {
-  //         // Simple array index access, use getProperty
-  //         const { property, pipes } = parsePropertyWithPipes(inner);
-  //         let result = getProperty(property, data);
-  //         // if (pipes) {
-  //         //   result = this.applyPipes(result, pipes);
-  //         // }
-  //         return result;
-  //       } else {
-  //         // Conditional find operation
-  //         return findWithCondition(inner, data);
-  //       }
-  //     }
-  //   }
-
-  // // Simple property access (may include pipes)
-  // const { property, pipes } = this.parsePropertyWithPipes(inner);
-  // let result = this.getProperty(property);
-
-  // // Apply pipes if any
-  // if (pipes) {
-  //   result = this.applyPipes(result, pipes);
-  // }
-
-  // return result;
+  return { main: expr.trim(), pipes: "" };
 };
 
-function extractOuterQuery(query: string) {
-  if (!query.startsWith("${")) {
-    throw new Error("Invalid query format. Expected ${...}");
-  }
+/** Safely extracts ternary operators ignoring strings and pipe arguments */
+const splitTernarySafe = (expr: string) => {
+  let inStr = false,
+    quoteChar = "",
+    depth = 0;
+  let qIndex = -1,
+    cIndex = -1;
 
-  let depth = 1; // Start at depth 1 since we're inside the outer ${}
-  let end = query.length;
+  for (let i = 0; i < expr.length; i++) {
+    const char = expr[i];
+    const prev = i > 0 ? expr[i - 1] : "";
 
-  // Find the matching closing brace for the outer ${}
-  for (let i = 2; i < query.length; i++) {
-    if (i > 0 && query[i - 1] === "$" && query[i] === "{") {
-      depth++;
-    } else if (query[i] === "}") {
-      depth--;
-      if (depth === 0) {
-        end = i;
-        break;
+    // Track if we are inside a string literal
+    if ((char === "'" || char === '"' || char === "`") && prev !== "\\") {
+      if (!inStr) {
+        inStr = true;
+        quoteChar = char;
+      } else if (quoteChar === char) inStr = false;
+    }
+
+    if (!inStr) {
+      if (char === "(" || char === "[" || char === "{") depth++;
+      else if (char === ")" || char === "]" || char === "}") depth--;
+      else if (char === "?" && depth === 0 && qIndex === -1) qIndex = i;
+      else if (char === ":" && depth === 0 && qIndex !== -1 && cIndex === -1) {
+        // Skip colons that are part of pipe arguments
+        const segment = expr.slice(qIndex + 1, i);
+        const nextStr = expr.slice(i + 1).trim();
+        const nextChar = nextStr ? nextStr[0] : "";
+        if (segment.includes("|") && nextChar !== "'" && nextChar !== '"')
+          continue;
+        cIndex = i;
       }
     }
   }
+  return { qIndex, cIndex };
+};
 
-  if (depth !== 0) {
-    throw new Error("Invalid query format. Unmatched braces.");
-  }
+// --- Core Evaluators ---
 
-  return query.slice(2, end); // Skip "${" and return up to matching "}"
-}
-
-function evaluateTemplateLiteral(template: string, data: any) {
-  // Remove outer backticks
-  const content = template.slice(1, -1);
-  let result = "";
-  let i = 0;
-
-  while (i < content.length) {
-    if (
-      content[i] === "$" &&
-      i + 1 < content.length &&
-      content[i + 1] === "{"
-    ) {
-      // Found ${...}, extract and evaluate
-      let depth = 1;
-      let j = i + 2;
-      while (j < content.length && depth > 0) {
-        if (
-          content[j] === "$" &&
-          j + 1 < content.length &&
-          content[j + 1] === "{"
-        ) {
-          depth++;
-          j += 2;
-        } else if (content[j] === "}") {
-          depth--;
-          if (depth === 0) {
-            break;
-          }
-          j++;
-        } else {
-          j++;
-        }
-      }
-
-      const innerQuery = content.slice(i + 2, j);
-      let queryResult;
-
-      // Try to evaluate as a full query first (handles all cases including array indices, pipes, etc.)
-      try {
-        queryResult = query(`\${${innerQuery}}`, data);
-      } catch (e) {
-        // If query evaluation fails, try as a property reference (including array indices)
-        // Match property paths like "property", "property.sub", "property[0]", "property[0].sub"
-        if (/^[a-zA-Z_][a-zA-Z0-9_.\[\]]*$/.test(innerQuery)) {
-          queryResult = getProperty(innerQuery, data);
-        } else {
-          queryResult = undefined;
-        }
-      }
-
-      result +=
-        queryResult !== null && queryResult !== undefined
-          ? String(queryResult)
-          : "";
-      i = j + 1;
-    } else {
-      result += content[i];
-      i++;
-    }
-  }
-
-  return result;
-}
-
-/**
- * Get property value from data using dot notation
- * @param {string} path - Property path like "items" or "id" or "items[0].type"
- * @returns {*} - Property value
- */
-function getProperty(path: string, data: any) {
-  // Split by '.' but handle array indices like items[0]
-  const parts = [];
-  let currentPart = "";
-  let bracketDepth = 0;
-
-  for (let i = 0; i < path.length; i++) {
-    const char = path[i];
-    if (char === "[") {
-      bracketDepth++;
-      currentPart += char;
-    } else if (char === "]") {
-      bracketDepth--;
-      currentPart += char;
-    } else if (char === "." && bracketDepth === 0) {
-      if (currentPart) {
-        parts.push(currentPart);
-        currentPart = "";
-      }
-    } else {
-      currentPart += char;
-    }
-  }
-  if (currentPart) {
-    parts.push(currentPart);
-  }
-
-  let current = data;
-  let parentObject = data;
-  let lastPartName = null;
+const getProperty = (
+  path: string,
+  context: any,
+  availablePipes: Record<string, PipeTransform>,
+): any => {
+  if (!path || path === "this") return context;
+  const parts = path.split(/\.(?![^\[]*\])/);
+  let current = context;
 
   for (const part of parts) {
-    if (current === null || current === undefined) {
-      return undefined;
-    }
+    if (current == null) return undefined;
 
-    // Check if part contains array index like "items[0]"
-    const arrayIndexMatch = part.match(/^(\w+)\[(\d+)\]$/);
-    if (arrayIndexMatch) {
-      const arrayName = arrayIndexMatch[1];
-      const index = parseInt(arrayIndexMatch[2], 10);
-      parentObject = current;
-      lastPartName = arrayName;
-      current = current[arrayName];
+    const arrayMatch = part.match(/^(\w+)\[(.+)\]$/);
+    if (arrayMatch) {
+      const [, name, indexExpr] = arrayMatch;
+      const array = current[name];
+      if (!Array.isArray(array)) return undefined;
 
-      // Auto-parse stringified JSON if it's a string
-      if (typeof current === "string") {
-        try {
-          const parsed = JSON.parse(current);
-          // Cache the parsed value back to the data object
-          parentObject[arrayName] = parsed;
-          current = parsed;
-        } catch (e) {
-          // Not valid JSON, continue with original string
-        }
-      }
-
-      if (Array.isArray(current) && index >= 0 && index < current.length) {
-        current = current[index];
+      if (/^\d+$/.test(indexExpr)) {
+        current = array[parseInt(indexExpr, 10)];
       } else {
-        return undefined;
+        const condParts = indexExpr.split("&&").map((p) => p.trim());
+        const targetPropRaw = condParts.pop() || "";
+
+        // Extract pipes if they are inside the array bracket condition
+        const { main: targetProp, pipes: innerPipes } =
+          extractPipes(targetPropRaw);
+
+        let foundItem;
+        if (/^\d+$/.test(condParts[0]) && condParts.length === 1) {
+          foundItem = array[parseInt(condParts[0], 10)];
+        } else {
+          foundItem = array.find((item) => {
+            return condParts.every((cond) => {
+              const match = cond.match(
+                /([\w\.\[\]]+)\s*(==|!=|>=|<=|>|<)\s*(.+)/,
+              );
+
+              // Fallback to truthiness check if no operator is found (e.g., isActive && ...)
+              if (!match) {
+                const val = getProperty(cond.trim(), item, availablePipes);
+                return !!val && val !== "" && val !== 0;
+              }
+
+              const [_, key, op, rawVal] = match;
+              const itemVal = getProperty(key, item, availablePipes);
+              const compareVal = rawVal.replace(/^['"]|['"]$/g, "");
+
+              if (op === "==") return String(itemVal) === compareVal;
+              if (op === "!=") return String(itemVal) !== compareVal;
+              if (op === ">=") return Number(itemVal) >= Number(compareVal);
+              if (op === "<=") return Number(itemVal) <= Number(compareVal);
+              if (op === ">") return Number(itemVal) > Number(compareVal);
+              if (op === "<") return Number(itemVal) < Number(compareVal);
+              return false;
+            });
+          });
+        }
+
+        if (!foundItem) {
+          current = undefined;
+        } else if (targetProp.startsWith("'") && targetProp.endsWith("'")) {
+          // Handle string literal return with potential inner object interpolation
+          const literal = targetProp.slice(1, -1);
+          current = literal.replace(/\$\{object\.([^}]+)\}/g, (_, p) => {
+            const val = getProperty(p, foundItem, availablePipes);
+            return val != null ? String(val) : "";
+          });
+        } else {
+          current = getProperty(targetProp, foundItem, availablePipes);
+        }
+
+        // Apply inner-bracket pipes
+        if (innerPipes && current !== undefined) {
+          current = applyPipes(current, innerPipes, availablePipes);
+        }
       }
     } else {
-      parentObject = current;
-      lastPartName = part;
       current = current[part];
-
-      // Auto-parse stringified JSON if it's a string
-      if (typeof current === "string") {
+      // Auto-parse JSON strings safely
+      if (
+        typeof current === "string" &&
+        (current.startsWith("{") || current.startsWith("["))
+      ) {
         try {
-          const parsed = JSON.parse(current);
-          // Cache the parsed value back to the data object
-          parentObject[part] = parsed;
-          current = parsed;
-        } catch (e) {
-          // Not valid JSON, continue with original string
-        }
+          current = JSON.parse(current);
+        } catch (e) {}
       }
     }
   }
-
   return current;
-}
+};
+
+const applyPipes = (
+  value: any,
+  pipeExpression: string,
+  availablePipes: Record<string, PipeTransform>,
+): any => {
+  if (!pipeExpression) return value;
+
+  const pipeSegments = pipeExpression.split("|");
+  return pipeSegments.reduce((acc, pipeStr, idx) => {
+    const firstColonIdx = pipeStr.indexOf(":");
+    let name = pipeStr.trim();
+    let params: string[] = [];
+
+    if (firstColonIdx !== -1) {
+      name = pipeStr.slice(0, firstColonIdx).trim();
+      let rawParams = pipeStr.slice(firstColonIdx + 1);
+
+      // If there's another pipe chained after this one, trim the trailing spaces
+      if (idx < pipeSegments.length - 1) {
+        rawParams = rawParams.trimEnd();
+      }
+
+      if (name === "formatDate") {
+        params = [rawParams.trim()];
+      } else if (name === "formatDuration" || name === "mapJoin") {
+        const splitIdx = rawParams.indexOf(":");
+        params =
+          splitIdx === -1
+            ? [rawParams.trim()]
+            : // Preserve exact spacing on the second argument (the separator)
+              [
+                rawParams.slice(0, splitIdx).trim(),
+                rawParams.slice(splitIdx + 1),
+              ];
+      } else {
+        params = rawParams.split(":").map((p) => p.trim());
+      }
+    }
+
+    const transform = availablePipes[name];
+    if (!transform) throw new Error(`Pipe "${name}" is not registered.`);
+    return transform(acc, ...params);
+  }, value);
+};
+
+const evaluateCondition = (
+  condition: string,
+  context: any,
+  availablePipes: Record<string, PipeTransform>,
+) => {
+  const match = condition.match(/([\w\.\[\]]+)\s*(==|!=|>=|<=|>|<)\s*(.+)/);
+  if (match) {
+    const [_, path, op, rawVal] = match;
+    const val = getProperty(path.trim(), context, availablePipes);
+    const compareVal = rawVal.replace(/^['"]|['"]$/g, "");
+
+    if (op === "==") return String(val) === compareVal;
+    if (op === "!=") return String(val) !== compareVal;
+    if (op === ">=") return Number(val) >= Number(compareVal);
+    if (op === "<=") return Number(val) <= Number(compareVal);
+    if (op === ">") return Number(val) > Number(compareVal);
+    if (op === "<") return Number(val) < Number(compareVal);
+  }
+  // Fallback to truthiness
+  const truthyVal = getProperty(condition.trim(), context, availablePipes);
+  return !!truthyVal && truthyVal !== "" && truthyVal !== 0;
+};
+
+const evaluateTemplate = (
+  template: string,
+  data: any,
+  options: QueryOptions,
+): string => {
+  const content = template.slice(1, -1);
+  return content.replace(/\${(.*?)}/g, (_, innerQuery) => {
+    const result = query(`\${${innerQuery}}`, data, options);
+    return result !== undefined && result !== null ? String(result) : "";
+  });
+};
+
+// --- Built-in Pipes (Stateless Dictionary) ---
+
+const BUILT_IN_PIPES: Record<string, PipeTransform> = {
+  uppercase: (val: any) => val?.toString().toUpperCase(),
+  lowercase: (val: any) => val?.toString().toLowerCase(),
+  slice: (val: any, start = "0", end?: string) => {
+    if (val == null) return val;
+    return Array.isArray(val) || typeof val === "string"
+      ? val.slice(parseInt(start, 10), end ? parseInt(end, 10) : undefined)
+      : val;
+  },
+  number: (val: any, decimals: string | null = null) => {
+    if (val == null || isNaN(val)) return val;
+    const num = parseFloat(val);
+    return decimals != null ? num.toFixed(parseInt(decimals, 10)) : num;
+  },
+  truncate: (val: any, length = "50") => {
+    if (val == null) return val;
+    const str = String(val);
+    const max = parseInt(length, 10);
+    if (isNaN(max) || max < 0) return str;
+    if (str.length <= max) return str;
+    return max < 3 ? str.slice(0, max) : str.slice(0, max - 3) + "...";
+  },
+  mapJoin: (val: any, property = "", separator = ", ") => {
+    if (val == null) return val;
+    if (!Array.isArray(val)) throw new Error("mapJoin pipe requires an array");
+    const cleanSep = separator.replace(/^['"]|['"]$/g, "");
+
+    return val
+      .map((item) => {
+        if (item == null) return null;
+        if (property && typeof item === "object") {
+          return getProperty(property.trim(), item, BUILT_IN_PIPES);
+        }
+        return item;
+      })
+      .filter((v) => v != null && v !== "")
+      .join(cleanSep);
+  },
+  currency: (val: any, symbol = "$", decimals = "2") => {
+    if (val == null) return val;
+    const num = parseFloat(val);
+    return isNaN(num) ? val : `${symbol}${num.toFixed(parseInt(decimals, 10))}`;
+  },
+  formatDate: (val: any, format = "YYYY-MM-DD HH:mm:ss") => {
+    if (!val) return val;
+    let d: Date;
+
+    if (typeof val === "number") {
+      d = new Date(val < 946684800000 ? val * 1000 : val);
+    } else {
+      d = new Date(val);
+      if (isNaN(d.getTime()) && typeof val === "string") {
+        const match = val.match(
+          /^(\d{4})-(\d{2})-(\d{2})(?:\s+(\d{2}):(\d{2}):(\d{2}))?$/,
+        );
+        if (match) {
+          const [, y, m, day, h = 0, min = 0, s = 0] = match.map(Number);
+          d = new Date(y, m - 1, day, h, min, s);
+        }
+      }
+    }
+
+    if (isNaN(d.getTime())) return val;
+
+    const pad = (n: number) => String(n).padStart(2, "0");
+    const monthAbbr = [
+      "Jan",
+      "Feb",
+      "Mar",
+      "Apr",
+      "May",
+      "Jun",
+      "Jul",
+      "Aug",
+      "Sep",
+      "Oct",
+      "Nov",
+      "Dec",
+    ];
+    const monthNames = [
+      "January",
+      "February",
+      "March",
+      "April",
+      "May",
+      "June",
+      "July",
+      "August",
+      "September",
+      "October",
+      "November",
+      "December",
+    ];
+
+    const formats: Record<string, () => string> = {
+      "YYYY-MM-DD": () =>
+        `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`,
+      "hh:mm:ss": () =>
+        `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`,
+      "HH:mm:ss": () =>
+        `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`,
+      "YYYY-MM-DD HH:mm:ss": () =>
+        `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`,
+      "DD MMM YYYY": () =>
+        `${pad(d.getDate())} ${monthAbbr[d.getMonth()]} ${d.getFullYear()}`,
+      "DD MMMM YYYY": () =>
+        `${pad(d.getDate())} ${monthNames[d.getMonth()]}, ${d.getFullYear()}`,
+      "MMMM-YYYY": () => `${monthNames[d.getMonth()]}-${d.getFullYear()}`,
+      "MM-YYYY": () => `${pad(d.getMonth() + 1)}-${d.getFullYear()}`,
+      "MM/YYYY": () => `${pad(d.getMonth() + 1)}/${d.getFullYear()}`,
+    };
+    return formats[format] ? formats[format]() : String(val);
+  },
+  formatDuration: (val: any, unit = "seconds", format = "HH:mm:ss") => {
+    if (val == null || isNaN(val)) return val;
+    let totalSeconds = parseFloat(val);
+
+    if (unit.toLowerCase().startsWith("min")) totalSeconds *= 60;
+    if (unit.toLowerCase().startsWith("hour") || unit.toLowerCase() === "h")
+      totalSeconds *= 3600;
+
+    const d = Math.floor(totalSeconds / 86400);
+    const h = Math.floor((totalSeconds % 86400) / 3600);
+    const m = Math.floor((totalSeconds % 3600) / 60);
+    const s = Math.floor(totalSeconds % 60);
+
+    const pad = (n: number, len = 2) => String(n).padStart(len, "0");
+
+    if (format === "HH:mm:ss")
+      return `${pad(Math.min(h + d * 24, 99))}:${pad(m)}:${pad(s)}`;
+    if (format === "HHH:mm:ss") {
+      const totalHours = h + d * 24;
+      return `${pad(totalHours, totalHours >= 100 ? 3 : 2)}:${pad(m)}:${pad(s)}`;
+    }
+    if (format === "DD:HHH:mm:ss")
+      return `${pad(d)}:${pad(h, 3)}:${pad(m)}:${pad(s)}`;
+    return String(val);
+  },
+};
+
+// --- Public Package API ---
 
 /**
- * Parse property key to extract property name and pipe expression
- * @param {string} propertyKey - Property key like "value" or "value | formatDate:hh:mm:ss"
- * @returns {object} - {property: string, pipes: string|null}
+ * Evaluates a template string with embedded queries against a data object.
+ * Supports array conditionals, nested properties, pipes, and ternaries.
+ * * @param queryString - The query string (e.g., "${items[type == 'TIR' && value | uppercase]}")
+ * @param data - The data object to query against
+ * @param options - Optional configuration (custom pipes)
+ * @returns The evaluated result
  */
-function parsePropertyWithPipes(propertyKey: string) {
-  // Check if it's a string literal
-  if (propertyKey.startsWith("'") && propertyKey.endsWith("'")) {
-    return { property: propertyKey, pipes: null };
+export const query = (
+  queryString: string,
+  data: Record<string, any> = {},
+  options: QueryOptions = {},
+): any => {
+  const mergedOptions: QueryOptions = {
+    ...options,
+    pipes: { ...BUILT_IN_PIPES, ...(options.pipes || {}) },
+  };
+  const availablePipes = mergedOptions.pipes!;
+
+  if (!queryString.startsWith("${") || !queryString.endsWith("}"))
+    return queryString;
+
+  // Keep a raw version to preserve trailing spaces for pipes
+  const innerRaw = queryString.slice(2, -1);
+  const inner = innerRaw.trim();
+
+  if (inner.startsWith("`") && inner.endsWith("`")) {
+    return evaluateTemplate(inner, data, mergedOptions);
   }
 
-  // Check if it contains pipes
-  if (propertyKey.includes("|")) {
-    const pipeIndex = propertyKey.indexOf("|");
-    const property = propertyKey.slice(0, pipeIndex).trim();
-    const pipes = propertyKey.slice(pipeIndex + 1).trim();
-    return { property, pipes };
+  if (inner.includes("?")) {
+    const { qIndex, cIndex } = splitTernarySafe(inner);
+    if (qIndex !== -1 && cIndex !== -1) {
+      const condition = inner.slice(0, qIndex).trim();
+      const isTrue = evaluateCondition(condition, data, availablePipes);
+      const selected = (
+        isTrue ? inner.slice(qIndex + 1, cIndex) : inner.slice(cIndex + 1)
+      ).trim();
+
+      if (selected.startsWith("${") || selected.startsWith("`")) {
+        return query(
+          selected.startsWith("`") ? `\${${selected}}` : selected,
+          data,
+          mergedOptions,
+        );
+      }
+      if (
+        (selected.startsWith("'") && selected.endsWith("'")) ||
+        (selected.startsWith('"') && selected.endsWith('"'))
+      ) {
+        return selected.slice(1, -1);
+      }
+
+      const { main: path, pipes: pipeExpr } = extractPipes(selected);
+      return applyPipes(
+        getProperty(path, data, availablePipes),
+        pipeExpr,
+        availablePipes,
+      );
+    }
   }
 
-  return { property: propertyKey, pipes: null };
-}
+  if (inner.endsWith(".length")) {
+    const val = getProperty(inner.replace(".length", ""), data, availablePipes);
+    return Array.isArray(val) ? val.length : 0;
+  }
 
-// function /**
-//  * Find item in array with conditions and return property
-//  * @param {string} query - Query like "items[type == 'TIR' && value]" or "items[1 && id]"
-//  * @returns {*} - Property value or undefined
-//  */
-// findWithCondition(query: string, data: any) {
-//   const bracketIdx = query.indexOf("[");
-//   const collectionPath = query.slice(0, bracketIdx);
-//   const conditionPart = query.slice(bracketIdx + 1, query.length - 1); // Remove trailing ']'
-
-//   // Get the array
-//   const array = getProperty(collectionPath, data);
-//   if (!Array.isArray(array)) {
-//     throw new Error(`Property "${collectionPath}" is not an array`);
-//   }
-
-//   // Split conditions and property
-//   const parts = conditionPart.split("&&").map((p) => p.trim());
-//   const propertyKey = parts[parts.length - 1];
-//   const firstPart = parts[0];
-
-//   // Check if first part is a numeric index (e.g., "1", "0", "2")
-//   const indexMatch = firstPart.match(/^\d+$/);
-//   if (indexMatch && parts.length === 2) {
-//     // This is an array index access: items[1 && id]
-//     const index = parseInt(firstPart, 10);
-//     if (index < 0 || index >= array.length) {
-//       return undefined;
-//     }
-//     const item = array[index];
-
-//     // Return property value or string if property is a string literal
-//     if (propertyKey.startsWith("'") && propertyKey.endsWith("'")) {
-//       const stringLiteral = propertyKey.slice(1, -1); // Remove quotes
-//       // Interpolate ${...} patterns in the string
-//       return interpolateString(stringLiteral, item);
-//     }
-
-//     // Parse property and pipes
-//     const { property, pipes } = parsePropertyWithPipes(propertyKey);
-//     let result = item[property];
-
-//     // Apply pipes if any
-//     //   if (pipes) {
-//     //     result = this.applyPipes(result, pipes);
-//     //   }
-
-//     return result;
-//   }
-
-//   // Otherwise, treat as conditions
-//   const conditions = parts.slice(0, parts.length - 1);
-
-//   // Parse all conditions
-//   const parsedConditions = conditions.map((cond) => parseCondition(cond, data));
-
-//   // Find the first item that matches all conditions
-//   const item = array.find((it) =>
-//     parsedConditions.every((condition) => evaluateCondition(it, condition)),
-//   );
-
-//   if (!item) {
-//     return undefined;
-//   }
-
-//   // Return property value or string if property is a string literal
-//   if (propertyKey.startsWith("'") && propertyKey.endsWith("'")) {
-//     const stringLiteral = propertyKey.slice(1, -1); // Remove quotes
-//     // Interpolate ${...} patterns in the string
-//     return this.interpolateString(stringLiteral, item);
-//   }
-
-//   // Parse property and pipes
-//   const { property, pipes } = this.parsePropertyWithPipes(propertyKey);
-//   let result = item[property];
-
-//   // Apply pipes if any
-//   if (pipes) {
-//     result = this.applyPipes(result, pipes);
-//   }
-
-//   return result;
-// }
+  // Use innerRaw here so the trailing space is passed to extractPipes
+  const { main: path, pipes: pipeExpr } = extractPipes(innerRaw);
+  return applyPipes(
+    getProperty(path, data, availablePipes),
+    pipeExpr,
+    availablePipes,
+  );
+};
