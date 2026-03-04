@@ -70,6 +70,9 @@ const getProperty = (
   availablePipes: Record<string, PipeTransform>,
 ): any => {
   if (!path || path === "this") return context;
+
+  if (path.startsWith("this.")) path = path.slice(5);
+
   const parts = path.split(/\.(?![^\[]*\])/);
   let current = context;
 
@@ -117,8 +120,8 @@ const getProperty = (
               if (op === ">=") return Number(itemVal) >= Number(compareVal);
               if (op === "<=") return Number(itemVal) <= Number(compareVal);
               if (op === ">") return Number(itemVal) > Number(compareVal);
-              if (op === "<") return Number(itemVal) < Number(compareVal);
-              return false;
+              // if (op === "<") return Number(itemVal) < Number(compareVal);
+              return Number(itemVal) < Number(compareVal);
             });
           });
         }

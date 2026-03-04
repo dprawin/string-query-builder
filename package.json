@@ -1,11 +1,11 @@
 {
   "name": "string-query-builder",
   "version": "0.1.0",
-  "description": "",
+  "description": "A lightweight, functional query builder with template literal and pipe support.",
   "type": "module",
+  "types": "./dist/index.d.ts",
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
-  "types": "./dist/index.d.ts",
   "files": [
     "dist",
     "README.md",
@@ -21,21 +21,31 @@
   "scripts": {
     "build": "tsup src/index.ts --format cjs,esm --dts --clean",
     "dev": "tsup src/index.ts --format cjs,esm --watch --dts",
-    "lint": "tsc"
+    "lint": "tsc",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "coverage": "vitest run --coverage"
   },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/dprawin/string-query-builder.git"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
+  "keywords": [
+    "query-builder",
+    "template-literals",
+    "json-query",
+    "pipes"
+  ],
+  "author": "Praveen Dodda",
+  "license": "MIT",
   "bugs": {
     "url": "https://github.com/dprawin/string-query-builder/issues"
   },
   "homepage": "https://github.com/dprawin/string-query-builder#readme",
   "devDependencies": {
+    "@vitest/coverage-v8": "^4.0.18",
     "tsup": "^8.5.1",
-    "typescript": "^5.9.3"
+    "typescript": "^5.9.3",
+    "vitest": "^4.0.18"
   }
 }
