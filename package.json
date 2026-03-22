@@ -1,6 +1,6 @@
 {
   "name": "string-query-builder",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "A lightweight, functional query builder with template literal and pipe support.",
   "type": "module",
   "types": "./dist/index.d.ts",

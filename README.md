@@ -51,6 +51,46 @@ console.log(query("${metrics.loginCount > 10 ? 'Active' : 'New'}", data));
 // Output: "Active"
 ```
 
+## 🔥 Real-World Use Case: API-Driven Templates
+
+When building a CMS, a Resume Builder, or dynamic email templates, your layout configurations (queries) are often stored in a database, while the actual user data is fetched from a REST API.
+
+`string-query-builder` allows you to cleanly separate your template logic from your data payload and resolve them on the fly.
+
+```js
+import { query } from "string-query-builder";
+
+// Imagine this payload comes directly from your backend API
+const apiResponse = {
+  data: {
+    user: {
+      firstName: "John",
+      lastName: "Doe",
+      email: "johndoe@example.com",
+      dob: 887954569, // Unix timestamp in seconds
+    },
+  },
+  // These queries could be configured in a database or CMS
+  queries: [
+    "${`Hi, My Name is ${user.firstName} ${user.lastName}`}",
+    "${`Email: ${user.email}`}",
+    "${`DOB: ${user.dob | formatDate:DD MMM YYYY}`}",
+  ],
+};
+
+// Map over your template queries and bind the data
+const renderedUI = apiResponse.queries.map((q) => query(q, apiResponse.data));
+
+console.log(renderedUI);
+/* Output:
+[
+  "Hi, My Name is John Doe",
+  "Email: johndoe@example.com",
+  "DOB: 20 Feb 1998"
+]
+*/
+```
+
 ## 📖 Feature Guide
 
 ### 1. Property & Array Access
